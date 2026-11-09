@@ -43,6 +43,13 @@
           "name": "Cockpit",
           "contextualTitle": "FailureLens Change Intelligence",
           "visibility": "visible"
+        },
+        {
+          "type": "webview",
+          "id": "failurelens.views.chat",
+          "name": "Ask",
+          "contextualTitle": "Ask FailureLens",
+          "visibility": "visible"
         }
       ]
     },
@@ -59,19 +66,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "failurelens.checkReleaseRisk",
+          "command": "failurelens.openDashboard",
           "when": "view == failurelens.views.dashboard",
           "group": "navigation@3"
         },
         {
-          "command": "failurelens.openDashboard",
-          "when": "view == failurelens.views.dashboard",
-          "group": "navigation@4"
-        },
-        {
           "command": "failurelens.showDockerLogs",
           "when": "view == failurelens.views.dashboard",
-          "group": "navigation@5"
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -142,6 +144,18 @@
       {
         "command": "failurelens.runAllHypothesesInDocker",
         "title": "Run All Hypotheses in Docker",
+        "category": "FailureLens",
+        "icon": "$(play-all)"
+      },
+      {
+        "command": "failurelens.stageSafeFiles",
+        "title": "FailureLens: Stage Confirmed Safe Files",
+        "category": "FailureLens",
+        "icon": "$(check)"
+      },
+      {
+        "command": "failurelens.runAllTests",
+        "title": "FailureLens: Run All Tests",
         "category": "FailureLens",
         "icon": "$(play-all)"
       },

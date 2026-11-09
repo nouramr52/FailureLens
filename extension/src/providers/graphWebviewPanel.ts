@@ -46,6 +46,11 @@ export class GraphWebviewPanel {
     this.update(this._knowledgeService);
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
+    this._panel.webview.onDidReceiveMessage((message) => {
+      if (message?.command === 'initGraph') {
+        vscode.commands.executeCommand('failurelens.initKnowledgeGraph');
+      }
+    }, null, this._disposables);
 
     this._knowledgeService.onGraphChanged(() => {
       this.update(this._knowledgeService);
@@ -57,15 +62,15 @@ export class GraphWebviewPanel {
     if (htmlPath && fs.existsSync(htmlPath)) {
       try {
         let content = fs.readFileSync(htmlPath, 'utf-8');
-        // Inject custom FailureLens style & top banner
-        const banner = `
-          <div style="position:fixed;top:10px;left:10px;z-index:9999;background:rgba(20,20,20,0.85);backdrop-filter:blur(6px);border:1px solid #3c3c3c;border-radius:6px;padding:6px 12px;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:12px;display:flex;align-items:center;gap:8px;box-shadow:0 4px 12px rgba(0,0,0,0.4);">
-            <span style="color:#3794ff;font-weight:700;">🛡️ FailureLens</span>
-            <span>Repository Knowledge Graph</span>
-            <span style="color:#858585;font-size:11px;">(Interactive D3/Vis.js)</span>
-          </div>
-        `;
-        content = content.replace('<body>', `<body>${banner}`);
+        const summary = knowledgeService.getSummary();
+        const detail = summary
+          ? `${summary.nodes} components · ${summary.edges} links · ${summary.communities} features`
+          : 'Repository knowledge graph';
+        const strip = `<div id="failurelens-strip" style="padding:10px 12px;border-bottom:1px solid var(--border);background:var(--panel);color:var(--text);font-size:12px;line-height:1.4;"><div style="font-weight:700;">FailureLens</div><div style="color:var(--text-2);">${detail}</div></div>`;
+        if (content.includes('<div id="sidebar">')) {
+          content = content.replace('<div id="sidebar">', `<div id="sidebar">${strip}`);
+        }
+        content += `\n<!-- updated: ${Date.now()} -->`;
         this._panel.webview.html = content;
         return;
       } catch (err) {
@@ -74,48 +79,62 @@ export class GraphWebviewPanel {
     }
 
     // Fallback if graph is not yet initialized
-    this._panel.webview.html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <style>
-          body {
-            background: #1e1e1e;
-            color: #ccc;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            text-align: center;
-          }
-          h2 { color: #fff; margin-bottom: 8px; }
-          p { color: #858585; max-width: 420px; line-height: 1.5; margin-bottom: 20px; }
-          button {
-            background: #007acc;
-            color: #fff;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-          }
-          button:hover { background: #0062a3; }
-        </style>
-      </head>
-      <body>
-        <h2>🛡️ Knowledge Graph Not Initialized</h2>
-        <p>FailureLens has not scanned and indexed this repository yet. Run initialization to map feature communities, AST symbols, and blast radius connections.</p>
-        <button onclick="vscode.postMessage({ command: 'initGraph' })">⚡ Initialize Repository Knowledge</button>
-        <script>
-          const vscode = acquireVsCodeApi();
-        </script>
-      </body>
-      </html>
-    `;
+    this._panel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-family: var(--vscode-font-family);
+      font-size: var(--vscode-font-size);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      text-align: center;
+      padding: 24px;
+    }
+    h2 { font-weight: 600; margin-bottom: 8px; }
+    p {
+      color: var(--vscode-descriptionForeground);
+      max-width: 420px;
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    button {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    button:hover { background: var(--vscode-button-hoverBackground); }
+    button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Knowledge graph not initialized</h2>
+  <p>FailureLens has not scanned this repository yet. Initialize it to map feature communities, symbols, and blast radius.</p>
+  <button id="init-btn" type="button">Initialize repository knowledge</button>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.getElementById('init-btn').addEventListener('click', function () {
+      vscode.postMessage({ command: 'initGraph' });
+    });
+  </script>
+</body>
+</html>`;
   }
 
   public dispose() {

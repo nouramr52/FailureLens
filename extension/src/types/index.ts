@@ -22,9 +22,16 @@ export interface Hypothesis {
   status: HypothesisStatus;
   impact: ImpactLevel;
   affectedComponent: string;
+  changedComponent?: string;
   evidence?: string;
   dockerTestCommand?: string;
   executionLogs?: string[];
+  testScripts?: RecommendedTest[];
+  passPercent?: number;
+  passedCount?: number;
+  failedCount?: number;
+  skippedCount?: number;
+  measuredWith?: number;
 }
 
 export interface AffectedComponent {
@@ -35,10 +42,27 @@ export interface AffectedComponent {
   isModified: boolean;
   couplingScore: number;
   serviceName?: string;
+  nodeId?: string;
+  label?: string;
+  depth?: number;
+  viaRelation?: string;
+  changePreview?: string;
+  isCleared?: boolean;
+}
+
+export interface RecommendedTest {
+  file: string;
+  reason: string;
+  runner: 'pytest' | 'npm';
+  passPercent?: number;
+  passedCount?: number;
+  failedCount?: number;
+  skippedCount?: number;
+  measuredWith?: number;
 }
 
 export interface PreventiveSuggestion {
-  recommendedTests: string[];
+  recommendedTests: RecommendedTest[];
   rolloutStrategy: {
     type: 'CANARY' | 'FULL' | 'STAGED';
     percentage: number;

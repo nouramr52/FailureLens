@@ -9,6 +9,7 @@ import {
   KnowledgeGraphSummary,
   AffectedComponent,
   Hypothesis,
+  RecommendedTest,
   BlastRadiusLevel
 } from '../types';
 
@@ -21,6 +22,10 @@ export class KnowledgeGraphService {
   private incomingEdges = new Map<string, GraphLink[]>();
   private outgoingEdges = new Map<string, GraphLink[]>();
   private communityLabels = new Map<number, string>();
+  private clearedNodeIds = new Set<string>();
+  private clearedFiles = new Set<string>();
+  private failedNodeIds = new Set<string>();
+  private failedFiles = new Set<string>();
 
   private onGraphChangedEmitter = new vscode.EventEmitter<KnowledgeGraphSummary | null>();
   public readonly onGraphChanged = this.onGraphChangedEmitter.event;
@@ -55,6 +60,223 @@ export class KnowledgeGraphService {
     return fs.existsSync(htmlPath) ? htmlPath : null;
   }
 
+  public getClearedNodeIds(): Set<string> {
+    return new Set(this.clearedNodeIds);
+  }
+
+  public getClearedFiles(): Set<string> {
+    return new Set(this.clearedFiles);
+  }
+
+  public getFailedNodeIds(): Set<string> {
+    return new Set(this.failedNodeIds);
+  }
+
+  public getFailedFiles(): Set<string> {
+    return new Set(this.failedFiles);
+  }
+
+  public async recordTestRunResults(
+    passed: boolean,
+    testFiles: string[],
+    hypothesisId?: string,
+    affectedComponents?: AffectedComponent[],
+    hypothesisTargetFile?: string
+  ): Promise<{ cleared: string[]; failed: string[] }> {
+    const root = this.getWorkspaceRoot();
+    if (!root) {
+      return { cleared: [], failed: [] };
+    }
+
+    const targetNodes = new Set<string>();
+    const targetFiles = new Set<string>();
+    const norm = (f: string) => f.replace(/\\/g, '/').toLowerCase().replace(/^\.\//, '').trim();
+
+    const sameFilePath = (a: string, b: string): boolean => {
+      const na = norm(a);
+      const nb = norm(b);
+      if (!na || !nb) {
+        return false;
+      }
+      return na === nb || na.endsWith('/' + nb) || nb.endsWith('/' + na);
+    };
+
+    const normalizedTests = testFiles.map(norm);
+
+    // 1. Gather candidate target files (strictly bounded to the hypothesis or matching test)
+    if (hypothesisTargetFile) {
+      targetFiles.add(norm(hypothesisTargetFile));
+    }
+    for (const tf of normalizedTests) {
+      targetFiles.add(tf);
+    }
+    if (affectedComponents && affectedComponents.length > 0) {
+      for (const comp of affectedComponents) {
+        if (comp.filePath) {
+          const compNorm = norm(comp.filePath);
+          const isTarget = hypothesisTargetFile
+            ? sameFilePath(compNorm, hypothesisTargetFile)
+            : normalizedTests.some((tf) => {
+                const base = path.basename(compNorm, path.extname(compNorm));
+                return base.length > 2 && tf.includes(base);
+              });
+          if (isTarget) {
+            targetFiles.add(compNorm);
+            if (comp.nodeId) {
+              targetNodes.add(comp.nodeId);
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Resolve nodes directly from target files
+    for (const targetFile of Array.from(targetFiles)) {
+      const directNodes = this.getNodesForFile(targetFile);
+      for (const n of directNodes) {
+        targetNodes.add(n.id);
+      }
+      for (const [nodeId, node] of this.nodeMap.entries()) {
+        const sf = norm(node.source_file || '');
+        if (sf && sameFilePath(sf, targetFile)) {
+          targetNodes.add(nodeId);
+        }
+      }
+    }
+
+    // 3. Match test file direct outgoing call dependencies
+    for (const testFile of normalizedTests) {
+      for (const [nodeId, node] of this.nodeMap.entries()) {
+        const sf = norm(node.source_file || '');
+        if (sf && sameFilePath(sf, testFile)) {
+          const outEdges = this.outgoingEdges.get(nodeId) || [];
+          for (const edge of outEdges) {
+            if (this.nodeMap.has(edge.target)) {
+              targetNodes.add(edge.target);
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Trace incoming callers strictly bounded to the affected components
+    const affectedNodeSet = new Set((affectedComponents || []).map((c) => c.nodeId).filter(Boolean) as string[]);
+    const callerQueue = Array.from(targetNodes);
+    for (let depth = 0; depth < 2; depth++) {
+      const nextQueue: string[] = [];
+      for (const nid of callerQueue) {
+        const callers = this.getIncomingCallers(nid);
+        for (const caller of callers) {
+          if (!targetNodes.has(caller.id) && affectedNodeSet.has(caller.id)) {
+            targetNodes.add(caller.id);
+            nextQueue.push(caller.id);
+          }
+        }
+      }
+      callerQueue.length = 0;
+      callerQueue.push(...nextQueue);
+    }
+
+    // 4. Update cleared vs failed state
+    if (passed) {
+      for (const nid of targetNodes) {
+        this.clearedNodeIds.add(nid);
+        this.failedNodeIds.delete(nid);
+      }
+      for (const file of targetFiles) {
+        this.clearedFiles.add(file);
+        this.failedFiles.delete(file);
+      }
+    } else {
+      for (const nid of targetNodes) {
+        this.failedNodeIds.add(nid);
+        this.clearedNodeIds.delete(nid);
+      }
+      for (const file of targetFiles) {
+        this.failedFiles.add(file);
+        this.clearedFiles.delete(file);
+      }
+    }
+
+    // 5. Persist to .failurelens/cleared-nodes.json and failed-nodes.json
+    const dir = path.join(root, '.failurelens');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(dir, 'cleared-nodes.json'),
+      JSON.stringify({ nodes: Array.from(this.clearedNodeIds), files: Array.from(this.clearedFiles) }, null, 2),
+      'utf8'
+    );
+    await fs.promises.writeFile(
+      path.join(dir, 'failed-nodes.json'),
+      JSON.stringify({ nodes: Array.from(this.failedNodeIds), files: Array.from(this.failedFiles) }, null, 2),
+      'utf8'
+    );
+
+    // 6. Update the graph.html overlay
+    await this.updateImpactOverlay();
+
+    // 7. Fire change event
+    this.onGraphChangedEmitter.fire(this.summary);
+
+    return {
+      cleared: Array.from(this.clearedNodeIds),
+      failed: Array.from(this.failedNodeIds)
+    };
+  }
+
+  public async clearNodesForPassedTests(
+    testFiles: string[],
+    hypothesisId?: string,
+    affectedComponents?: AffectedComponent[],
+    hypothesisTargetFile?: string
+  ): Promise<string[]> {
+    const res = await this.recordTestRunResults(true, testFiles, hypothesisId, affectedComponents, hypothesisTargetFile);
+    return res.cleared;
+  }
+
+  public async updateImpactOverlay(): Promise<void> {
+    const root = this.getWorkspaceRoot();
+    if (!root || !this.isInitialized()) {
+      return;
+    }
+
+    const pythonCmd = this.resolvePythonCommand();
+    const cliPath = this.resolveEngineCliPath();
+    const clearedPath = path.join(root, '.failurelens', 'cleared-nodes.json');
+    const failedPath = path.join(root, '.failurelens', 'failed-nodes.json');
+
+    try {
+      const command = `"${pythonCmd}" "${cliPath}" update-impact "${root}" --cleared "${clearedPath}" --failed "${failedPath}"`;
+      await execAsync(command, { cwd: root });
+    } catch (err) {
+      console.warn('[FailureLens] update-impact command failed:', err);
+    }
+  }
+
+  public async resetClearedNodes(): Promise<void> {
+    this.clearedNodeIds.clear();
+    this.clearedFiles.clear();
+    this.failedNodeIds.clear();
+    this.failedFiles.clear();
+    const root = this.getWorkspaceRoot();
+    if (root) {
+      const clearedPath = path.join(root, '.failurelens', 'cleared-nodes.json');
+      const failedPath = path.join(root, '.failurelens', 'failed-nodes.json');
+      try {
+        if (fs.existsSync(clearedPath)) {
+          await fs.promises.unlink(clearedPath);
+        }
+      } catch {}
+      try {
+        if (fs.existsSync(failedPath)) {
+          await fs.promises.unlink(failedPath);
+        }
+      } catch {}
+      await this.updateImpactOverlay();
+      this.onGraphChangedEmitter.fire(this.summary);
+    }
+  }
+
   public async tryLoadExistingGraph(): Promise<boolean> {
     const root = this.getWorkspaceRoot();
     if (!root) {
@@ -76,6 +298,28 @@ export class KnowledgeGraphService {
       const communities = new Set(nodes.map((n: GraphNode) => n.community)).size;
 
       const critNodes = this.computeCriticalNodes(nodes, links);
+
+      const clearedPath = path.join(root, '.failurelens', 'cleared-nodes.json');
+      if (fs.existsSync(clearedPath)) {
+        try {
+          const rawCleared = JSON.parse(await fs.promises.readFile(clearedPath, 'utf-8'));
+          this.clearedNodeIds = new Set(rawCleared.nodes || []);
+          this.clearedFiles = new Set(rawCleared.files || []);
+        } catch {
+          // ignore
+        }
+      }
+
+      const failedPath = path.join(root, '.failurelens', 'failed-nodes.json');
+      if (fs.existsSync(failedPath)) {
+        try {
+          const rawFailed = JSON.parse(await fs.promises.readFile(failedPath, 'utf-8'));
+          this.failedNodeIds = new Set(rawFailed.nodes || []);
+          this.failedFiles = new Set(rawFailed.files || []);
+        } catch {
+          // ignore
+        }
+      }
 
       let isStale = false;
       const builtAtCommit = data.built_at_commit || undefined;
@@ -253,8 +497,9 @@ export class KnowledgeGraphService {
   }
 
   public async getBlastRadiusForFiles(
-    files: string[]
-  ): Promise<{ affectedComponents: AffectedComponent[]; hypotheses: Hypothesis[]; recommendedTests: string[] }> {
+    files: string[],
+    linesFile?: string
+  ): Promise<{ affectedComponents: AffectedComponent[]; hypotheses: Hypothesis[]; recommendedTests: RecommendedTest[] }> {
     const root = this.getWorkspaceRoot();
     if (!root || !this.isInitialized()) {
       return { affectedComponents: [], hypotheses: [], recommendedTests: [] };
@@ -263,9 +508,10 @@ export class KnowledgeGraphService {
     const pythonCmd = this.resolvePythonCommand();
     const cliPath = this.resolveEngineCliPath();
     const quotedFiles = files.map(f => `"${f}"`).join(' ');
+    const linesArg = linesFile ? ` --lines "${linesFile}"` : '';
 
     try {
-      const command = `"${pythonCmd}" "${cliPath}" affected "${root}" ${quotedFiles}`;
+      const command = `"${pythonCmd}" "${cliPath}" affected "${root}"${linesArg} ${quotedFiles}`;
       const { stdout } = await execAsync(command, { cwd: root });
 
       const lines = stdout.trim().split('\n');
@@ -280,10 +526,12 @@ export class KnowledgeGraphService {
       if (jsonStr) {
         const parsed = JSON.parse(jsonStr);
         if (parsed.status === 'success') {
+          const affectedComponents = parsed.affectedComponents || [];
+          const recommendedTests = this.normalizeTests(parsed.recommendedTests);
           return {
-            affectedComponents: parsed.affectedComponents || [],
-            hypotheses: parsed.hypotheses || [],
-            recommendedTests: parsed.recommendedTests || []
+            affectedComponents,
+            hypotheses: this.attachTestScripts(parsed.hypotheses || [], recommendedTests, affectedComponents),
+            recommendedTests
           };
         }
       }
@@ -292,54 +540,131 @@ export class KnowledgeGraphService {
     }
 
     // In-memory fallback traversal
-    return this.calculateInMemoryBlastRadius(files);
+    return this.calculateInMemoryBlastRadius(files, linesFile);
+  }
+
+  private normalizeTests(raw: unknown): RecommendedTest[] {
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    const tests: RecommendedTest[] = [];
+    for (const item of raw) {
+      if (!item || typeof item !== 'object' || !('file' in item)) {
+        continue;
+      }
+      const record = item as { file?: string; reason?: string; runner?: string };
+      if (!record.file) {
+        continue;
+      }
+      tests.push({
+        file: record.file,
+        reason: record.reason || 'covers a changed symbol',
+        runner: record.runner === 'npm' ? 'npm' : 'pytest'
+      });
+    }
+    return tests;
+  }
+
+  private loadLinesFile(linesFile?: string): Record<string, number[]> {
+    if (!linesFile || !fs.existsSync(linesFile)) {
+      return {};
+    }
+    try {
+      const raw = JSON.parse(fs.readFileSync(linesFile, 'utf8')) as Record<string, number[]>;
+      const lines: Record<string, number[]> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (Array.isArray(value)) {
+          lines[key.replace(/\\/g, '/').replace(/^\.\//, '')] = value.map((n) => Number(n));
+        }
+      }
+      return lines;
+    } catch {
+      return {};
+    }
+  }
+
+  private linesForFile(filePath: string, linesByFile: Record<string, number[]>): number[] | undefined {
+    const norm = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+    if (linesByFile[norm]) {
+      return linesByFile[norm];
+    }
+    for (const [key, lines] of Object.entries(linesByFile)) {
+      if (norm.endsWith('/' + key) || key.endsWith('/' + norm)) {
+        return lines;
+      }
+    }
+    return undefined;
   }
 
   private calculateInMemoryBlastRadius(
-    files: string[]
-  ): { affectedComponents: AffectedComponent[]; hypotheses: Hypothesis[]; recommendedTests: string[] } {
+    files: string[],
+    linesFile?: string
+  ): { affectedComponents: AffectedComponent[]; hypotheses: Hypothesis[]; recommendedTests: RecommendedTest[] } {
     const normalizedFiles = new Set(files.map(f => f.replace(/\\/g, '/').replace(/^\.\//, '')));
+    const linesByFile = this.loadLinesFile(linesFile);
     const affected: AffectedComponent[] = [];
     const visited = new Set<string>();
 
-    for (const [filePath, nodes] of this.fileToNodes.entries()) {
-      const matches = normalizedFiles.has(filePath) || [...normalizedFiles].some(mf => filePath.endsWith(mf));
-      if (matches) {
-        for (const n of nodes) {
-          if (!visited.has(n.id)) {
-            visited.add(n.id);
-            const line = parseInt((n.source_location || 'L1').replace('L', ''), 10) || 1;
-            const inCount = (this.incomingEdges.get(n.id) || []).length;
-            const outCount = (this.outgoingEdges.get(n.id) || []).length;
+    const spans = new Map<string, { start: number; end: number | null }>();
+    for (const [, nodes] of this.fileToNodes.entries()) {
+      const ordered = [...nodes].sort((a, b) => this.nodeLine(a) - this.nodeLine(b));
+      ordered.forEach((node, index) => {
+        const start = this.nodeLine(node);
+        const end = index + 1 < ordered.length ? this.nodeLine(ordered[index + 1]) : null;
+        spans.set(node.id, { start, end });
+      });
+    }
 
+    for (const [filePath, nodes] of this.fileToNodes.entries()) {
+      const matches = normalizedFiles.has(filePath) || [...normalizedFiles].some(mf => filePath.endsWith('/' + mf) || mf.endsWith('/' + filePath));
+      if (!matches) {
+        continue;
+      }
+      const hunkLines = this.linesForFile(filePath, linesByFile);
+      for (const n of nodes) {
+        if (visited.has(n.id)) {
+          continue;
+        }
+        if (hunkLines && !this.spanOverlaps(spans.get(n.id), hunkLines)) {
+          continue;
+        }
+        visited.add(n.id);
+        const line = this.nodeLine(n);
+        const inCount = (this.incomingEdges.get(n.id) || []).length;
+        const outCount = (this.outgoingEdges.get(n.id) || []).length;
+
+        affected.push({
+          id: `comp_${affected.length + 1}`,
+          nodeId: n.id,
+          label: n.label,
+          filePath: n.source_file,
+          line,
+          level: 'DIRECT',
+          isModified: true,
+          couplingScore: Math.min(99, Math.max(20, inCount * 15 + outCount * 10)),
+          serviceName: n.community_name || 'Core Module',
+          depth: 0,
+          viaRelation: 'modified'
+        });
+
+        const callers = this.incomingEdges.get(n.id) || [];
+        for (const c of callers) {
+          const callerNode = this.nodeMap.get(c.source);
+          if (callerNode && !visited.has(callerNode.id) && callerNode.source_file) {
+            visited.add(callerNode.id);
             affected.push({
               id: `comp_${affected.length + 1}`,
-              filePath: n.source_file,
-              line,
-              level: 'DIRECT',
-              isModified: true,
-              couplingScore: Math.min(99, Math.max(20, inCount * 15 + outCount * 10)),
-              serviceName: n.community_name || 'Core Module'
+              nodeId: callerNode.id,
+              label: callerNode.label,
+              filePath: callerNode.source_file,
+              line: this.nodeLine(callerNode),
+              level: 'HIGH',
+              isModified: false,
+              couplingScore: 65,
+              serviceName: callerNode.community_name || 'Dependent Service',
+              depth: 1,
+              viaRelation: c.relation
             });
-
-            // Find immediate incoming callers
-            const callers = this.incomingEdges.get(n.id) || [];
-            for (const c of callers) {
-              const callerNode = this.nodeMap.get(c.source);
-              if (callerNode && !visited.has(callerNode.id) && callerNode.source_file) {
-                visited.add(callerNode.id);
-                const cLine = parseInt((callerNode.source_location || 'L1').replace('L', ''), 10) || 1;
-                affected.push({
-                  id: `comp_${affected.length + 1}`,
-                  filePath: callerNode.source_file,
-                  line: cLine,
-                  level: 'HIGH',
-                  isModified: false,
-                  couplingScore: 65,
-                  serviceName: callerNode.community_name || 'Dependent Service'
-                });
-              }
-            }
           }
         }
       }
@@ -350,20 +675,187 @@ export class KnowledgeGraphService {
           {
             id: 'h1',
             title: `Potential Regression in ${path.basename(affected[0].filePath)}`,
-            description: `Modified symbols affect ${affected.length - 1} dependent components in blast radius. Verify contract compatibility.`,
+            description: `Modified symbols affect ${Math.max(0, affected.length - 1)} dependent components in blast radius. Run the covering tests before deploy.`,
             status: 'UNTESTED',
             impact: 'HIGH',
-            affectedComponent: affected[0].filePath,
-            dockerTestCommand: `docker run --rm failurelens-val test_suite`
+            affectedComponent: affected[0].filePath
           }
         ]
       : [];
 
+    const recommendedTests = this.testsForAffected(affected, normalizedFiles);
     return {
       affectedComponents: affected,
-      hypotheses,
-      recommendedTests: ['npm test', 'pytest']
+      hypotheses: this.attachTestScripts(hypotheses, recommendedTests, affected),
+      recommendedTests
     };
+  }
+
+  private nodeLine(node: GraphNode): number {
+    const match = /^L(\d+)/.exec(node.source_location || 'L1');
+    return match ? parseInt(match[1], 10) : 1;
+  }
+
+  private spanOverlaps(span: { start: number; end: number | null } | undefined, lines: number[]): boolean {
+    if (!span) {
+      return false;
+    }
+    return lines.some((line) => {
+      if (span.end === null) {
+        return line >= span.start;
+      }
+      if (span.end <= span.start) {
+        return line === span.start;
+      }
+      return line >= span.start && line < span.end;
+    });
+  }
+
+  private testsForAffected(affected: AffectedComponent[], changedFiles: Set<string>): RecommendedTest[] {
+    const tests: RecommendedTest[] = [];
+    const seen = new Set<string>();
+    const production = affected.filter((item) => !this.isTestPath(item.filePath || ''));
+    const coverIds = new Set(
+      production
+        .filter((item) => item.isModified || item.depth === 1)
+        .map((item) => item.nodeId)
+        .filter((id): id is string => !!id)
+    );
+    const editedTests = affected
+      .filter((item) => item.isModified && this.isTestPath(item.filePath || ''))
+      .map((item) => item.filePath);
+    const add = (file: string, reason: string) => {
+      const norm = file.replace(/\\/g, '/');
+      if (!norm || seen.has(norm) || tests.length >= 8 || !this.isTestPath(norm)) {
+        return;
+      }
+      seen.add(norm);
+      tests.push({
+        file: norm,
+        reason,
+        runner: norm.endsWith('.py') ? 'pytest' : 'npm'
+      });
+    };
+
+    for (const [nodeId, node] of this.nodeMap.entries()) {
+      if (!this.isTestPath(node.source_file || '')) {
+        continue;
+      }
+      for (const edge of this.outgoingEdges.get(nodeId) || []) {
+        if (coverIds.has(edge.target)) {
+          const target = this.nodeMap.get(edge.target);
+          add(node.source_file, `covers ${target?.label || edge.target}`);
+          break;
+        }
+      }
+    }
+
+    for (const file of changedFiles) {
+      if (this.isTestPath(file)) {
+        continue;
+      }
+      const stem = path.basename(file, path.extname(file));
+      const names = new Set([
+        `test_${stem}.py`, `${stem}_test.py`,
+        `${stem}.test.ts`, `${stem}.spec.ts`, `${stem}.test.js`, `${stem}.spec.js`
+      ]);
+      for (const [candidate] of this.fileToNodes.entries()) {
+        if (names.has(path.basename(candidate))) {
+          add(candidate, `name matches ${path.basename(file)}`);
+        }
+      }
+    }
+    for (const file of editedTests) {
+      add(file, 'edited test; run this file');
+    }
+    return tests;
+  }
+
+  private attachTestScripts(
+    hypotheses: Hypothesis[],
+    tests: RecommendedTest[],
+    affected: AffectedComponent[]
+  ): Hypothesis[] {
+    const norm = (value: string) => value.replace(/\\/g, '/').replace(/^\.\//, '');
+    const labelsByFile = new Map<string, Set<string>>();
+    for (const component of affected) {
+      const file = norm(component.filePath || '');
+      if (!file) {
+        continue;
+      }
+      const labels = labelsByFile.get(file) ?? new Set<string>();
+      if (component.label) {
+        labels.add(component.label);
+      }
+      labelsByFile.set(file, labels);
+    }
+
+    const labelsFor = (target: string): Set<string> => {
+      const direct = labelsByFile.get(target);
+      if (direct) {
+        return direct;
+      }
+      for (const [file, labels] of labelsByFile) {
+        if (file.endsWith('/' + target) || target.endsWith('/' + file)) {
+          return labels;
+        }
+      }
+      return new Set();
+    };
+
+    const sameFile = (left: string, right: string) =>
+      left === right || left.endsWith('/' + right) || right.endsWith('/' + left);
+
+    const coversFile = (reason: string, target: string): boolean => {
+      if (!reason.startsWith('covers ')) {
+        return false;
+      }
+      const label = reason.slice('covers '.length);
+      if (labelsFor(target).has(label)) {
+        return true;
+      }
+      for (const node of this.nodeMap.values()) {
+        if (node.label !== label || !node.source_file) {
+          continue;
+        }
+        if (sameFile(norm(node.source_file), target)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    return hypotheses.map((hypothesis) => {
+      const targets = [hypothesis.affectedComponent, hypothesis.changedComponent]
+        .map((value) => norm(value || ''))
+        .filter((value, index, all) => value && all.indexOf(value) === index);
+      const testScripts = tests.filter((test) => {
+        const file = norm(test.file);
+        const reason = test.reason || '';
+        return targets.some((target) => {
+          const base = target.split('/').pop() || '';
+          if (sameFile(file, target)) {
+            return true;
+          }
+          if (reason === `imports ${target}` || (base && (reason === `name matches ${base}` || reason === `imports ${base}`))) {
+            return true;
+          }
+          return coversFile(reason, target);
+        });
+      });
+      return { ...hypothesis, testScripts };
+    });
+  }
+
+  private isTestPath(filePath: string): boolean {
+    const name = path.basename(filePath).toLowerCase();
+    if ((name.startsWith('test_') && name.endsWith('.py')) || name.endsWith('_test.py')) {
+      return true;
+    }
+    if (/\.(test|spec)\.(ts|tsx|js|jsx)$/.test(name)) {
+      return true;
+    }
+    return filePath.replace(/\\/g, '/').split('/').some((part) => part === 'test' || part === 'tests' || part === '__tests__');
   }
 
   public getNodesForFile(filePath: string): GraphNode[] {
@@ -402,7 +894,7 @@ export class KnowledgeGraphService {
 
   public queryGraph(query: string): string {
     if (!this.summary) {
-      return 'FailureLens Knowledge Graph is not yet initialized. Click "⚡ Initialize / Re-sync" in Cockpit.';
+      return 'FailureLens Knowledge Graph is not yet initialized. Run FailureLens: Initialize Project Knowledge Graph.';
     }
 
     const q = query.toLowerCase().trim();

@@ -51,35 +51,32 @@ export class StatusBarProvider implements vscode.Disposable {
     switch (risk.decision) {
       case 'BLOCK':
         this.riskStatusBarItem.text = `$(error) ■ BLOCK (${risk.score}%)`;
-        this.riskStatusBarItem.tooltip = `FailureLens Risk: BLOCK (${risk.score}/100)\nHigh risk of failure detected in staged changes.\nClick to view hypotheses & Docker validation.`;
         this.riskStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
         break;
       case 'REVIEW':
         this.riskStatusBarItem.text = `$(eye) ◆ REVIEW (${risk.score}%)`;
-        this.riskStatusBarItem.tooltip = `FailureLens Risk: REVIEW (${risk.score}/100)\nManual peer review or validation recommended.`;
         this.riskStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         break;
       case 'CAUTION':
         this.riskStatusBarItem.text = `$(info) ▼ CAUTION (${risk.score}%)`;
-        this.riskStatusBarItem.tooltip = `FailureLens Risk: CAUTION (${risk.score}/100)\nMinor risk identified. Verify suggested tests.`;
         this.riskStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         break;
       case 'DEPLOY':
         this.riskStatusBarItem.text = `$(check) ● DEPLOY (${risk.score}%)`;
-        this.riskStatusBarItem.tooltip = `FailureLens Risk: DEPLOY (${risk.score}/100)\nChanges verified safe for deployment.`;
         this.riskStatusBarItem.backgroundColor = undefined;
         break;
     }
+    this.riskStatusBarItem.tooltip = `FailureLens: ${risk.decision} (${risk.score}/100)\n${risk.summary}`;
     this.riskStatusBarItem.show();
   }
 
   private updateDockerStatus(): void {
     const isReady = this.dockerService.isAvailable();
     if (isReady) {
-      this.dockerStatusBarItem.text = '🐳 Docker: Ready';
+      this.dockerStatusBarItem.text = '$(vm) Docker: Ready';
       this.dockerStatusBarItem.tooltip = 'Local Docker daemon connected. Hypothesis tests run in isolated containers.';
     } else {
-      this.dockerStatusBarItem.text = '🐳 Docker: Standby';
+      this.dockerStatusBarItem.text = '$(vm) Docker: Standby';
       this.dockerStatusBarItem.tooltip = 'Docker daemon not running. Local sandboxed runner active. Click to view logs.';
     }
     this.dockerStatusBarItem.show();

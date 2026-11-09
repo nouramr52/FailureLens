@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { AuthService } from './services/authService';
 import { ProjectService } from './services/projectService';
 import { DockerRunnerService } from './services/dockerRunnerService';
@@ -7,9 +9,133 @@ import { IncidentService } from './services/incidentService';
 import { KnowledgeGraphService } from './services/knowledgeGraphService';
 import { StatusBarProvider } from './providers/statusBarProvider';
 import { DashboardWebviewProvider } from './providers/dashboardWebviewProvider';
+import { ChatWebviewProvider } from './providers/chatWebviewProvider';
 import { CodeRiskProvider } from './providers/codeLensProvider';
 import { GraphWebviewPanel } from './providers/graphWebviewPanel';
-import { Hypothesis, IncidentRootCause } from './types';
+import { Hypothesis, IncidentRootCause, RecommendedTest } from './types';
+
+const execAsync = promisify(exec);
+
+async function runHypotheses(
+  riskService: RiskAnalysisService,
+  dockerService: DockerRunnerService,
+  hypotheses: Hypothesis[],
+  extensionUri?: vscode.Uri,
+  knowledgeService?: KnowledgeGraphService
+): Promise<void> {
+  const runnable = hypotheses.filter((hypothesis) => (hypothesis.testScripts || []).length > 0);
+  if (runnable.length === 0) {
+    vscode.window.showWarningMessage('No hypothesis has a test script. Deploy stays on caution.');
+    return;
+  }
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'FailureLens',
+      cancellable: true
+    },
+    async (progress, token) => {
+      let sawFailure = false;
+      for (let index = 0; index < runnable.length; index += 1) {
+        if (token.isCancellationRequested) {
+          return;
+        }
+        const hypothesis = runnable[index];
+        const tests = hypothesis.testScripts || [];
+        const names = tests.map((test) => test.file.replace(/\\/g, '/').split('/').pop() || test.file);
+        progress.report({ message: `Running ${names.join(', ')} (${index + 1}/${runnable.length})…` });
+        const res = await dockerService.runSelectedTests(
+          tests,
+          (update) => {
+            if (typeof update.increment === 'number') {
+              progress.report({ message: update.message, increment: update.increment });
+            } else {
+              progress.report({ message: update.message });
+            }
+          },
+          token
+        );
+        if (res.cancelled) {
+          return;
+        }
+        if (res.runnerMissing) {
+          vscode.window.showErrorMessage(`Could not start the test runner. ${res.output.split('\n').slice(-3).join(' ')}`);
+          return;
+        }
+        const files = tests.map((test) => test.file);
+        await riskService.applyTestRunResult(res.success, files, res.output, hypothesis.id);
+        if (!res.success) {
+          sawFailure = true;
+        }
+      }
+      if (extensionUri && knowledgeService && knowledgeService.isInitialized()) {
+        GraphWebviewPanel.createOrShow(extensionUri, knowledgeService);
+      }
+      const summary = riskService.getRisk()?.summary || 'Finished the hypothesis tests.';
+      const choice = sawFailure
+        ? await vscode.window.showErrorMessage(summary, 'Show test log')
+        : await vscode.window.showInformationMessage(summary, 'Show test log');
+      if (choice === 'Show test log') {
+        dockerService.showLogs();
+      }
+    }
+  );
+}
+
+async function runCoveringTests(
+  riskService: RiskAnalysisService,
+  dockerService: DockerRunnerService,
+  tests: RecommendedTest[],
+  startMessage: string,
+  emptyMessage: string,
+  hypothesisId?: string,
+  extensionUri?: vscode.Uri,
+  knowledgeService?: KnowledgeGraphService
+): Promise<void> {
+  if (tests.length === 0) {
+    vscode.window.showWarningMessage(emptyMessage);
+    return;
+  }
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'FailureLens',
+      cancellable: true
+    },
+    async (progress, token) => {
+      progress.report({ message: startMessage });
+      const res = await dockerService.runSelectedTests(
+        tests,
+        (update) => {
+          if (typeof update.increment === 'number') {
+            progress.report({ message: update.message, increment: update.increment });
+          } else {
+            progress.report({ message: update.message });
+          }
+        },
+        token
+      );
+      if (res.cancelled) {
+        return;
+      }
+      if (res.runnerMissing) {
+        vscode.window.showErrorMessage(`Could not start the test runner. ${res.output.split('\n').slice(-3).join(' ')}`);
+        return;
+      }
+      const files = tests.map((test) => test.file);
+      const { conclusion } = await riskService.applyTestRunResult(res.success, files, res.output, hypothesisId);
+      if (extensionUri && knowledgeService && knowledgeService.isInitialized()) {
+        GraphWebviewPanel.createOrShow(extensionUri, knowledgeService);
+      }
+      const choice = res.success
+        ? await vscode.window.showInformationMessage(conclusion, 'Show test log')
+        : await vscode.window.showErrorMessage(conclusion, 'Show test log');
+      if (choice === 'Show test log') {
+        dockerService.showLogs();
+      }
+    }
+  );
+}
 
 export function activate(context: vscode.ExtensionContext) {
   // 1. Initialize core services
@@ -17,7 +143,7 @@ export function activate(context: vscode.ExtensionContext) {
   const projectService = new ProjectService(context);
   const dockerService = new DockerRunnerService();
   const knowledgeService = new KnowledgeGraphService(context);
-  const riskService = new RiskAnalysisService(knowledgeService);
+  const riskService = new RiskAnalysisService(context, knowledgeService);
   const incidentService = new IncidentService();
 
   // 2. Initialize Status Bar Provider
@@ -28,13 +154,20 @@ export function activate(context: vscode.ExtensionContext) {
   const dashboardProvider = new DashboardWebviewProvider(
     context.extensionUri,
     riskService,
-    dockerService,
     incidentService,
     projectService,
     knowledgeService
   );
+  const chatProvider = new ChatWebviewProvider(
+    context.extensionUri,
+    riskService,
+    incidentService,
+    dockerService,
+    knowledgeService
+  );
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(DashboardWebviewProvider.viewType, dashboardProvider)
+    vscode.window.registerWebviewViewProvider(DashboardWebviewProvider.viewType, dashboardProvider),
+    vscode.window.registerWebviewViewProvider(ChatWebviewProvider.viewType, chatProvider)
   );
 
   // 4. Register Code Risk Marker Providers (CodeLens + Hover)
@@ -118,54 +251,74 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Docker Runner Commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('failurelens.runHypothesisInDocker', async (item?: unknown) => {
-      let hypothesisId = 'h1';
-      let title = 'DB Connection Pool Exhaustion';
-
-      if (item && typeof item === 'object' && 'hypothesis' in item) {
-        const h = (item as { hypothesis: Hypothesis }).hypothesis;
-        hypothesisId = h.id;
-        title = h.title;
-      }
-
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: `Docker Runner: Executing ${title}...`,
-          cancellable: false
-        },
-        async () => {
-          const res = await dockerService.runValidationInContainer(hypothesisId);
-          if (!res.success) {
-            riskService.setHypothesisStatus(
-              hypothesisId,
-              'CONFIRMED',
-              'Docker test confirmed failure: 99ms timeout threshold exceeded.'
-            );
-            vscode.window.showErrorMessage(
-              `❌ Docker Validation: Hypothesis confirmed! Failure reproduced in container.`
-            );
-          } else {
-            riskService.setHypothesisStatus(
-              hypothesisId,
-              'REJECTED',
-              'Docker test verified behavior: All assertions passed.'
-            );
-            vscode.window.showInformationMessage(
-              `✅ Docker Validation: Hypothesis rejected! System passed validation test.`
-            );
-          }
-        }
+    vscode.commands.registerCommand('failurelens.runHypothesisInDocker', async (arg?: { hypothesis?: Hypothesis }) => {
+      const id = arg?.hypothesis?.id;
+      const current = id ? riskService.getHypotheses().find((item) => item.id === id) : undefined;
+      const hypothesis = current || arg?.hypothesis;
+      const tests = hypothesis?.testScripts ?? [];
+      const names = tests.map((test) => test.file.replace(/\\/g, '/').split('/').pop() || test.file);
+      const title = hypothesis?.title || 'this issue';
+      await runCoveringTests(
+        riskService,
+        dockerService,
+        tests,
+        names.length ? `Running ${names.join(', ')}…` : 'Running test…',
+        `No test script covers "${title}".`,
+        hypothesis?.id,
+        context.extensionUri,
+        knowledgeService
       );
     }),
 
+    vscode.commands.registerCommand('failurelens.stageSafeFiles', async (files?: string[], hypothesisId?: string) => {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) {
+        vscode.window.showErrorMessage('FailureLens: No active workspace folder found.');
+        return;
+      }
+
+      let targets: string[] = [];
+      if (files && files.length > 0) {
+        targets = files.filter(Boolean);
+      } else {
+        targets = Array.from(knowledgeService.getClearedFiles());
+      }
+
+      if (targets.length === 0) {
+        vscode.window.showInformationMessage('FailureLens: No safe files to stage.');
+        return;
+      }
+
+      try {
+        const quoted = targets.map((f) => `"${f.replace(/\\/g, '/')}"`).join(' ');
+        await execAsync(`git add ${quoted}`, { cwd: root });
+        vscode.window.showInformationMessage(
+          `FailureLens: Staged ${targets.length} safe file(s) in Git: ${targets.join(', ')}`
+        );
+        await riskService.analyzeStagedDiff();
+        await knowledgeService.updateImpactOverlay();
+        if (knowledgeService.isInitialized() && GraphWebviewPanel.currentPanel) {
+          GraphWebviewPanel.currentPanel.update(knowledgeService);
+        }
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`FailureLens: Failed to stage files: ${err?.message || err}`);
+      }
+    }),
+
     vscode.commands.registerCommand('failurelens.runAllHypothesesInDocker', async () => {
-      vscode.window.showInformationMessage('Spawning Docker test runners for all hypotheses...');
-      await dockerService.runValidationInContainer('all');
+      await vscode.commands.executeCommand('failurelens.runSelectedTests');
+    }),
+
+    vscode.commands.registerCommand('failurelens.runAllTests', async () => {
+      await runHypotheses(riskService, dockerService, riskService.getHypotheses(), context.extensionUri, knowledgeService);
     }),
 
     vscode.commands.registerCommand('failurelens.showDockerLogs', () => {
       dockerService.showLogs();
+    }),
+
+    vscode.commands.registerCommand('failurelens.runSelectedTests', async () => {
+      await runHypotheses(riskService, dockerService, riskService.getHypotheses(), context.extensionUri, knowledgeService);
     }),
 
     vscode.commands.registerCommand('failurelens.confirmHypothesis', (item?: unknown) => {
@@ -250,7 +403,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     vscode.commands.registerCommand('failurelens.ask', () => {
       vscode.commands.executeCommand('workbench.view.extension.failurelens-sidebar');
-      vscode.commands.executeCommand('failurelens.views.dashboard.focus');
+      vscode.commands.executeCommand('failurelens.views.chat.focus');
     }),
 
     vscode.commands.registerCommand('failurelens.toggleNotifications', async () => {
@@ -262,6 +415,20 @@ export function activate(context: vscode.ExtensionContext) {
       );
     })
   );
+
+  // Re-read the git tree after a save. Unsaved buffers are invisible to git.
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(() => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+      }
+      saveTimer = setTimeout(() => {
+        riskService.analyzeStagedDiff();
+      }, 400);
+    })
+  );
+  riskService.analyzeStagedDiff();
 
   // Startup check for Knowledge Graph initialization
   if (!knowledgeService.isInitialized()) {

@@ -104,18 +104,26 @@ export class HypothesesTreeProvider implements vscode.TreeDataProvider<vscode.Tr
         item.contextValue = 'hypothesis';
         (item as unknown as { hypothesis: Hypothesis }).hypothesis = h;
 
+        const scriptNames = (h.testScripts || []).map((test) => test.file.replace(/\\/g, '/').split('/').pop() || test.file);
+        const scriptNote = scriptNames.length ? scriptNames.join(', ') : 'No test script';
+        const pctNote = typeof h.passPercent === 'number'
+          ? `${h.passPercent}% passed · `
+          : (h.testScripts || []).length
+            ? '0% passed · '
+            : '';
         if (h.status === 'CONFIRMED') {
           item.iconPath = new vscode.ThemeIcon('error', new vscode.ThemeColor('testing.iconFailed'));
-          item.description = '[Confirmed in Docker]';
+          item.description = `[Confirmed] · ${pctNote}${scriptNote}`;
         } else if (h.status === 'REJECTED') {
           item.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('testing.iconPassed'));
-          item.description = '[Rejected / Safe]';
+          item.description = `[Rejected] · ${pctNote}${scriptNote}`;
         } else {
           item.iconPath = new vscode.ThemeIcon('circle-slash');
-          item.description = '[Untested]';
+          item.description = `[Untested] · ${pctNote}${scriptNote}`;
         }
 
-        item.tooltip = `${h.description}\nAffected: ${h.affectedComponent}\nImpact: ${h.impact}`;
+        const scriptPaths = (h.testScripts || []).map((test) => `${test.file}${test.reason ? ` — ${test.reason}` : ''}`).join('\n');
+        item.tooltip = `${h.description}\nTest script: ${scriptPaths || 'none'}\nAffected: ${h.affectedComponent}\nImpact: ${h.impact}`;
         return item;
       });
       return Promise.resolve(items);
@@ -131,7 +139,8 @@ export class HypothesesTreeProvider implements vscode.TreeDataProvider<vscode.Tr
       details.push(descItem);
 
       if (hypothesis.evidence) {
-        const evItem = new BaseTreeItem(`Evidence: ${hypothesis.evidence}`);
+        const evItem = new BaseTreeItem(hypothesis.evidence.split('\n')[0]);
+        evItem.tooltip = hypothesis.evidence;
         evItem.iconPath = new vscode.ThemeIcon('file-binary');
         details.push(evItem);
       }
@@ -139,6 +148,27 @@ export class HypothesesTreeProvider implements vscode.TreeDataProvider<vscode.Tr
       const compItem = new BaseTreeItem(`Target: ${hypothesis.affectedComponent}`);
       compItem.iconPath = new vscode.ThemeIcon('file-code');
       details.push(compItem);
+
+      const scripts = hypothesis.testScripts || [];
+      if (scripts.length === 0) {
+        const missing = new BaseTreeItem('No test script covers this issue');
+        missing.iconPath = new vscode.ThemeIcon('circle-slash');
+        details.push(missing);
+      } else {
+        scripts.forEach((test) => {
+          const name = test.file.replace(/\\/g, '/').split('/').pop() || test.file;
+          const runItem = new BaseTreeItem(`▶ ${name}`);
+          runItem.description = test.reason || test.file;
+          runItem.tooltip = test.file;
+          runItem.iconPath = new vscode.ThemeIcon('play');
+          runItem.command = {
+            command: 'failurelens.runHypothesisInDocker',
+            title: 'Run test script',
+            arguments: [{ hypothesis }]
+          };
+          details.push(runItem);
+        });
+      }
 
       return Promise.resolve(details);
     }
@@ -167,12 +197,18 @@ export class BlastRadiusTreeProvider implements vscode.TreeDataProvider<vscode.T
     const items = components.map((c) => {
       const item = new BaseTreeItem(`${c.filePath}:${c.line}`);
       item.contextValue = 'component';
-      item.description = `${c.level} blast radius (${c.couplingScore}% coupling)`;
-      item.iconPath = c.isModified
-        ? new vscode.ThemeIcon('edit', new vscode.ThemeColor('gitDecoration.modifiedResourceForeground'))
-        : new vscode.ThemeIcon('references');
+      if (c.isCleared) {
+        item.description = `Safe to push (Cleared) · ${c.level} blast radius`;
+        item.iconPath = new vscode.ThemeIcon('pass', new vscode.ThemeColor('testing.iconPassed'));
+        item.tooltip = `Service: ${c.serviceName || 'Unknown'}\nStatus: Safe to push (verified by passed test script)\nClick to open in editor`;
+      } else {
+        item.description = `${c.level} blast radius (${c.couplingScore}% coupling)`;
+        item.iconPath = c.isModified
+          ? new vscode.ThemeIcon('edit', new vscode.ThemeColor('gitDecoration.modifiedResourceForeground'))
+          : new vscode.ThemeIcon('references');
+        item.tooltip = `Service: ${c.serviceName || 'Unknown'}\nStatus: Could be affected\nClick to open in editor`;
+      }
 
-      item.tooltip = `Service: ${c.serviceName || 'Unknown'}\nClick to open in editor`;
       item.command = {
         command: 'failurelens.jumpToCode',
         title: 'Jump to Code',
@@ -215,8 +251,10 @@ export class SuggestionsTreeProvider implements vscode.TreeDataProvider<vscode.T
 
     // Recommended Tests
     suggestions.recommendedTests.forEach((t) => {
-      const testItem = new BaseTreeItem(t);
-      testItem.iconPath = new vscode.ThemeIcon('check-all');
+      const pct = typeof t.passPercent === 'number' ? `${t.passPercent}% passed · ` : '';
+      const label = `${pct}${t.reason ? `${t.file} — ${t.reason}` : t.file}`;
+      const testItem = new BaseTreeItem(label);
+      testItem.iconPath = new vscode.ThemeIcon(t.failedCount ? 'error' : typeof t.passPercent === 'number' ? 'pass' : 'check-all');
       items.push(testItem);
     });
 
