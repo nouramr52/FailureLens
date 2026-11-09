@@ -1,0 +1,284 @@
+{
+  "name": "failurelens-vscode",
+  "displayName": "FailureLens",
+  "description": "Software-change intelligence platform: pre-deployment risk prediction & post-deployment incident root cause ranking.",
+  "version": "0.1.0",
+  "publisher": "failurelens",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Testing",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "failurelens",
+    "risk prediction",
+    "incident",
+    "root cause",
+    "docker",
+    "reliability"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:failurelens.views.dashboard"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "failurelens-sidebar",
+          "title": "FailureLens",
+          "icon": "resources/shield.svg"
+        }
+      ]
+    },
+    "views": {
+      "failurelens-sidebar": [
+        {
+          "type": "webview",
+          "id": "failurelens.views.dashboard",
+          "name": "Cockpit",
+          "contextualTitle": "FailureLens Change Intelligence",
+          "visibility": "visible"
+        },
+        {
+          "type": "webview",
+          "id": "failurelens.views.chat",
+          "name": "Ask",
+          "contextualTitle": "Ask FailureLens",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "failurelens.openKnowledgeGraph",
+          "when": "view == failurelens.views.dashboard",
+          "group": "navigation@1"
+        },
+        {
+          "command": "failurelens.initKnowledgeGraph",
+          "when": "view == failurelens.views.dashboard",
+          "group": "navigation@2"
+        },
+        {
+          "command": "failurelens.openDashboard",
+          "when": "view == failurelens.views.dashboard",
+          "group": "navigation@3"
+        },
+        {
+          "command": "failurelens.showDockerLogs",
+          "when": "view == failurelens.views.dashboard",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "failurelens.jumpToCode",
+          "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "failurelens.checkPreCommitRisk",
+          "group": "navigation"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "failurelens.initKnowledgeGraph",
+        "title": "FailureLens: Initialize Project Knowledge Graph",
+        "category": "FailureLens",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "failurelens.updateKnowledgeGraph",
+        "title": "FailureLens: Re-Sync Knowledge Graph",
+        "category": "FailureLens",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "failurelens.openKnowledgeGraph",
+        "title": "FailureLens: Open Interactive Knowledge Graph",
+        "category": "FailureLens",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "failurelens.signIn",
+        "title": "FailureLens: Sign In",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.signOut",
+        "title": "FailureLens: Sign Out",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.selectProject",
+        "title": "FailureLens: Select Active Project",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.checkReleaseRisk",
+        "title": "FailureLens: Check Release Risk (Staged Changes)",
+        "category": "FailureLens",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "failurelens.checkPreCommitRisk",
+        "title": "FailureLens: Check Pre-Commit Risk",
+        "category": "FailureLens",
+        "icon": "$(shield-check)"
+      },
+      {
+        "command": "failurelens.runHypothesisInDocker",
+        "title": "Run in Docker",
+        "category": "FailureLens",
+        "icon": "$(play)"
+      },
+      {
+        "command": "failurelens.runAllHypothesesInDocker",
+        "title": "Run All Hypotheses in Docker",
+        "category": "FailureLens",
+        "icon": "$(play-all)"
+      },
+      {
+        "command": "failurelens.stageSafeFiles",
+        "title": "FailureLens: Stage Confirmed Safe Files",
+        "category": "FailureLens",
+        "icon": "$(check)"
+      },
+      {
+        "command": "failurelens.runAllTests",
+        "title": "FailureLens: Run All Tests",
+        "category": "FailureLens",
+        "icon": "$(play-all)"
+      },
+      {
+        "command": "failurelens.showDockerLogs",
+        "title": "Show Docker Logs",
+        "category": "FailureLens",
+        "icon": "$(output)"
+      },
+      {
+        "command": "failurelens.confirmHypothesis",
+        "title": "Confirm Hypothesis",
+        "category": "FailureLens",
+        "icon": "$(check)"
+      },
+      {
+        "command": "failurelens.rejectHypothesis",
+        "title": "Reject Hypothesis",
+        "category": "FailureLens",
+        "icon": "$(close)"
+      },
+      {
+        "command": "failurelens.inspectActiveIncident",
+        "title": "FailureLens: Inspect Active Incident",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.replayRootCauseInDocker",
+        "title": "Replay in Docker",
+        "category": "FailureLens",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "failurelens.jumpToCode",
+        "title": "Jump to Code",
+        "category": "FailureLens",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "failurelens.openDashboard",
+        "title": "Open in Dashboard",
+        "category": "FailureLens",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "failurelens.ask",
+        "title": "FailureLens: Ask FailureLens...",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.toggleNotifications",
+        "title": "FailureLens: Toggle Notifications",
+        "category": "FailureLens"
+      },
+      {
+        "command": "failurelens.simulateIncident",
+        "title": "FailureLens: Simulate/Toggle Active Incident (Demo)",
+        "category": "FailureLens"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "failurelens.checkReleaseRisk",
+        "key": "ctrl+shift+f r",
+        "mac": "cmd+shift+f r"
+      },
+      {
+        "command": "failurelens.runAllHypothesesInDocker",
+        "key": "ctrl+shift+f d",
+        "mac": "cmd+shift+f d"
+      },
+      {
+        "command": "failurelens.inspectActiveIncident",
+        "key": "ctrl+shift+f i",
+        "mac": "cmd+shift+f i"
+      },
+      {
+        "command": "failurelens.ask",
+        "key": "ctrl+shift+f a",
+        "mac": "cmd+shift+f a"
+      }
+    ],
+    "configuration": {
+      "title": "FailureLens",
+      "properties": {
+        "failurelens.notifications.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable incident alerts and release risk notifications."
+        },
+        "failurelens.activeProject": {
+          "type": "string",
+          "default": "",
+          "description": "Linked FailureLens project ID or name."
+        },
+        "failurelens.dashboardUrl": {
+          "type": "string",
+          "default": "https://app.failurelens.io",
+          "description": "URL of the FailureLens web dashboard."
+        },
+        "failurelens.docker.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use local Docker daemon for hypothesis validations and root cause replays."
+        },
+        "failurelens.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom Python executable path for the FailureLens Knowledge Engine."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "tsc -p ./",
+    "sync-engine": "node -e \"const fs=require('fs'); fs.cpSync('../src/engine', './engine', {recursive: true}); console.log('Synced src/engine -> extension/engine');\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.3"
+  }
+}
