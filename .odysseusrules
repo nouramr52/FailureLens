@@ -1,0 +1,15 @@
+# Odysseus Workspace Rules
+# These instructions are injected into every conversation in this workspace.
+
+## Coding conventions
+- 
+
+## Architecture notes
+- 
+
+## Do not modify
+- 
+
+## Learned by agent
+<!-- the agent appends durable facts here via the update_rules tool, gated by the same
+     write-approval flow as any other file edit -->

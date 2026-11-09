@@ -1,0 +1,15 @@
+# Odysseus ignore — the agent will never read, write, or reference these paths.
+# One glob/name per line. Lines starting with # are comments.
+#
+# Always-on defaults (don't need to be repeated here):
+#   .smbdelete*
+#   .DS_Store
+#   ._.DS_Store
+#   __MACOSX
+#   *.vsix
+#   *.log
+#   *.tmp
+
+# Add your own patterns below, e.g.:
+# .env
+# secrets/
