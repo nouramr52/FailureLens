@@ -3,7 +3,7 @@ FailureLens Knowledge Engine - Directional Blast Radius & Coupling Analysis
 Traverses reverse-dependency chains (incoming caller edges) in the directed knowledge
 graph to calculate true change impact, affected components, and coupling scores.
 """
-from typing import Dict, List, Set, Any, Optional
+from typing import Dict, List, Set, Any, Optional, Tuple
 import networkx as nx
 from pathlib import Path
 
@@ -18,6 +18,69 @@ INDIRECT_FAILURE_RELATIONS = {
 
 ALL_FAILURE_RELATIONS = DIRECT_FAILURE_RELATIONS | INDIRECT_FAILURE_RELATIONS
 
+def _norm(path: str) -> str:
+    return (path or "").replace("\\", "/").lstrip("./")
+
+def _line_of(data: Dict[str, Any]) -> int:
+    loc = str(data.get("source_location") or "L1")
+    if loc.startswith("L"):
+        num = loc[1:].split("-")[0].split(":")[0]
+        if num.isdigit():
+            return int(num)
+    return 1
+
+def _file_in_set(src: str, modified: Set[str]) -> bool:
+    if src in modified:
+        return True
+    for mf in modified:
+        if src.endswith("/" + mf) or mf.endswith("/" + src):
+            return True
+    return False
+
+def _lines_for(src: str, modified_lines: Optional[Dict[str, List[int]]]) -> Optional[List[int]]:
+    """Return hunk lines for this file, or None when the file has no line filter.
+
+    None means every symbol in the file is a seed (untracked file, or no hunk map).
+    A list means only symbols whose span overlaps those lines are seeds.
+    """
+    if not modified_lines:
+        return None
+    if src in modified_lines:
+        return modified_lines[src]
+    for key, lines in modified_lines.items():
+        if src.endswith("/" + key) or key.endswith("/" + src):
+            return lines
+    return None
+
+def _build_spans(G: nx.DiGraph) -> Dict[str, Tuple[int, Optional[int]]]:
+    """Span of each node: start line inclusive, end line exclusive (next node in the file)."""
+    by_file: Dict[str, List[Tuple[str, int]]] = {}
+    for node_id, data in G.nodes(data=True):
+        src = _norm(data.get("source_file", ""))
+        if not src:
+            continue
+        by_file.setdefault(src, []).append((node_id, _line_of(data)))
+
+    spans: Dict[str, Tuple[int, Optional[int]]] = {}
+    for items in by_file.values():
+        items.sort(key=lambda item: (item[1], item[0]))
+        for index, (node_id, start) in enumerate(items):
+            end = items[index + 1][1] if index + 1 < len(items) else None
+            spans[node_id] = (start, end)
+    return spans
+
+def _span_overlaps(start: int, end: Optional[int], lines: List[int]) -> bool:
+    for line in lines:
+        if end is None:
+            if line >= start:
+                return True
+        elif end <= start:
+            if line == start:
+                return True
+        elif start <= line < end:
+            return True
+    return False
+
 def calculate_blast_radius(
     G: nx.DiGraph,
     modified_files: List[str],
@@ -29,7 +92,9 @@ def calculate_blast_radius(
     Strictly follows reverse dependency edges (incoming edges from callers).
     Returns a list of FailureLens-compatible AffectedComponent dicts.
     """
-    normalized_mod_files = {f.replace("\\", "/").lstrip("./") for f in modified_files}
+    normalized_mod_files = {_norm(f) for f in modified_files if f}
+    if modified_lines:
+        modified_lines = {_norm(k): [int(n) for n in v] for k, v in modified_lines.items()}
     affected_components: List[Dict[str, Any]] = []
     visited_nodes: Set[str] = set()
 
@@ -37,28 +102,21 @@ def calculate_blast_radius(
     if not G.is_directed():
         # Promote to DiGraph
         G = G.to_directed()
+    spans = _build_spans(G)
 
     # 1. Identify seed nodes residing in the modified files
     seed_nodes: List[str] = []
     for node_id, data in G.nodes(data=True):
-        src_file = data.get("source_file", "").replace("\\", "/").lstrip("./")
+        src_file = _norm(data.get("source_file", ""))
         if not src_file:
             continue
 
-        matches_file = (
-            src_file in normalized_mod_files
-            or any(src_file.endswith(mf) for mf in normalized_mod_files)
-        )
-
-        if matches_file:
-            loc_str = str(data.get("source_location", "L1"))
-            line = int(loc_str.replace("L", "")) if loc_str.startswith("L") and loc_str[1:].isdigit() else 1
-
-            # Check line filter if available
-            if modified_lines and src_file in modified_lines:
-                lines_for_file = modified_lines[src_file]
-                # If specific lines provided and node doesn't match, check proximity
-                if lines_for_file and line not in lines_for_file and not any(abs(line - l) <= 20 for l in lines_for_file):
+        if _file_in_set(src_file, normalized_mod_files):
+            line = _line_of(data)
+            lines_for_file = _lines_for(src_file, modified_lines)
+            if lines_for_file is not None:
+                span = spans.get(node_id, (line, None))
+                if not _span_overlaps(span[0], span[1], lines_for_file):
                     continue
 
             seed_nodes.append(node_id)

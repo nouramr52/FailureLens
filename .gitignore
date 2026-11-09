@@ -25,6 +25,7 @@ wheels/
 
 # FailureLens Knowledge Graph cache
 .failurelens/cache/
+.failurelens/diff-lines.json
 graphify-out/cache/
 
 # Node / VS Code Extension

@@ -19,17 +19,30 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.engine.detector import detect_files
-from src.engine.blast_radius import calculate_blast_radius
-from src.engine.analyzer import identify_critical_nodes, generate_hypotheses_from_graph, find_relevant_tests
-from src.engine.visualizer import generate_graph_html
-from src.engine.adapter import FailureLensGraphAdapter
+try:
+    from src.engine.detector import detect_files
+    from src.engine.blast_radius import calculate_blast_radius
+    from src.engine.analyzer import identify_critical_nodes, generate_hypotheses_from_graph, find_relevant_tests
+    from src.engine.visualizer import generate_graph_html, classify_change_impact, inject_change_overlay
+    from src.engine.adapter import FailureLensGraphAdapter
+except ImportError:
+    from detector import detect_files
+    from blast_radius import calculate_blast_radius
+    from analyzer import identify_critical_nodes, generate_hypotheses_from_graph, find_relevant_tests
+    from visualizer import generate_graph_html, classify_change_impact, inject_change_overlay
+    from adapter import FailureLensGraphAdapter
 
 def cmd_init(workspace_path: Path):
-    from src.engine.core.extract import extract
-    from src.engine.core.build import build_from_json
-    from src.engine.core.cluster import cluster
-    from src.engine.core.export import to_json
+    try:
+        from src.engine.core.extract import extract
+        from src.engine.core.build import build_from_json
+        from src.engine.core.cluster import cluster
+        from src.engine.core.export import to_json
+    except ImportError:
+        from core.extract import extract
+        from core.build import build_from_json
+        from core.cluster import cluster
+        from core.export import to_json
 
     root = workspace_path.resolve()
     adapter = FailureLensGraphAdapter(root)
@@ -113,7 +126,7 @@ def cmd_init(workspace_path: Path):
     }
     print(json.dumps(result))
 
-def cmd_affected(workspace_path: Path, files: List[str]):
+def cmd_affected(workspace_path: Path, files: List[str], lines_path: str = ""):
     root = workspace_path.resolve()
     adapter = FailureLensGraphAdapter(root)
 
@@ -126,9 +139,27 @@ def cmd_affected(workspace_path: Path, files: List[str]):
         }))
         return
 
-    affected = calculate_blast_radius(G, files)
-    hypotheses = generate_hypotheses_from_graph(G, affected)
-    tests = find_relevant_tests(G, affected)
+    modified_lines = None
+    if lines_path:
+        try:
+            raw = json.loads(Path(lines_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(json.dumps({
+                "status": "error",
+                "message": f"Could not read hunk lines: {exc}"
+            }))
+            return
+        if isinstance(raw, dict):
+            modified_lines = {
+                str(key).replace("\\", "/"): [int(n) for n in value]
+                for key, value in raw.items()
+                if isinstance(value, list)
+            }
+
+    changed = [f for f in files if f]
+    affected = calculate_blast_radius(G, changed, modified_lines=modified_lines)
+    tests = find_relevant_tests(G, affected, repo_root=root)
+    hypotheses = generate_hypotheses_from_graph(G, affected, tests)
 
     result = {
         "status": "success",
@@ -178,6 +209,78 @@ def cmd_subgraph(workspace_path: Path, node_ids: List[str], depth: int = 2):
     except Exception as exc:
         print(json.dumps({"status": "error", "message": str(exc)}))
 
+def cmd_update_impact(workspace_path: Path, cleared_path: str = "", failed_path: str = ""):
+    root = workspace_path.resolve()
+    adapter = FailureLensGraphAdapter(root)
+
+    try:
+        G = adapter.load_digraph()
+    except FileNotFoundError:
+        print(json.dumps({"status": "error", "message": "Knowledge graph not initialized. Run init first."}))
+        return
+
+    cleared_nodes = set()
+    cleared_files = set()
+    if cleared_path and Path(cleared_path).exists():
+        try:
+            raw = json.loads(Path(cleared_path).read_text(encoding="utf-8"))
+            cleared_nodes = set(raw.get("nodes", []))
+            cleared_files = set(raw.get("files", []))
+        except Exception:
+            pass
+    elif (adapter.out_dir / "cleared-nodes.json").exists():
+        try:
+            raw = json.loads((adapter.out_dir / "cleared-nodes.json").read_text(encoding="utf-8"))
+            cleared_nodes = set(raw.get("nodes", []))
+            cleared_files = set(raw.get("files", []))
+        except Exception:
+            pass
+
+    failed_nodes = set()
+    failed_files = set()
+    if failed_path and Path(failed_path).exists():
+        try:
+            raw = json.loads(Path(failed_path).read_text(encoding="utf-8"))
+            failed_nodes = set(raw.get("nodes", []))
+            failed_files = set(raw.get("files", []))
+        except Exception:
+            pass
+    elif (adapter.out_dir / "failed-nodes.json").exists():
+        try:
+            raw = json.loads((adapter.out_dir / "failed-nodes.json").read_text(encoding="utf-8"))
+            failed_nodes = set(raw.get("nodes", []))
+            failed_files = set(raw.get("files", []))
+        except Exception:
+            pass
+
+    impact = classify_change_impact(
+        G,
+        start_dir=root,
+        cleared_nodes=cleared_nodes,
+        cleared_files=cleared_files,
+        failed_nodes=failed_nodes,
+        failed_files=failed_files,
+    )
+
+    if adapter.graph_html_path.exists():
+        inject_change_overlay(adapter.graph_html_path, impact)
+
+    counts = {"edited": 0, "affected": 0, "safe": 0, "failed": 0, "critical": 0}
+    for info in impact.get("nodes", {}).values():
+        status = str(info.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+
+    unpushed = sum(1 for info in impact.get("nodes", {}).values() if info.get("edited") == "yes")
+    counts["unpushed"] = unpushed
+
+    print(json.dumps({
+        "status": "success",
+        "counts": counts,
+        "nodes": len(impact.get("nodes", {})),
+        "graphHtml": str(adapter.graph_html_path),
+    }))
+
 def main():
     parser = argparse.ArgumentParser(description="FailureLens Knowledge Graph Engine CLI")
     subparsers = parser.add_subparsers(dest="command")
@@ -189,7 +292,8 @@ def main():
     # affected
     p_affected = subparsers.add_parser("affected")
     p_affected.add_argument("workspace", type=str, default=".", nargs="?")
-    p_affected.add_argument("files", nargs="*", default=["src/db/pool.py"])
+    p_affected.add_argument("--lines", dest="lines", default="", help="JSON file mapping repo-relative paths to changed line numbers")
+    p_affected.add_argument("files", nargs="*", default=[])
 
     # query
     p_query = subparsers.add_parser("query")
@@ -202,6 +306,12 @@ def main():
     p_subgraph.add_argument("--nodes", nargs="+", required=True)
     p_subgraph.add_argument("--depth", type=int, default=2)
 
+    # update-impact
+    p_impact = subparsers.add_parser("update-impact")
+    p_impact.add_argument("workspace", type=str, default=".", nargs="?")
+    p_impact.add_argument("--cleared", dest="cleared", default="", help="JSON file mapping cleared node IDs and files")
+    p_impact.add_argument("--failed", dest="failed", default="", help="JSON file mapping failed node IDs and files")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -213,11 +323,13 @@ def main():
     if args.command == "init":
         cmd_init(ws)
     elif args.command == "affected":
-        cmd_affected(ws, args.files)
+        cmd_affected(ws, args.files, lines_path=args.lines)
     elif args.command == "query":
         cmd_query(ws, args.query)
     elif args.command == "subgraph":
         cmd_subgraph(ws, args.nodes, depth=args.depth)
+    elif args.command == "update-impact":
+        cmd_update_impact(ws, cleared_path=args.cleared, failed_path=args.failed)
 
 if __name__ == "__main__":
     main()
